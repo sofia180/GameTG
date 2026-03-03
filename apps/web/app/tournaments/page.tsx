@@ -5,43 +5,35 @@ import Card from "../../components/Card";
 import Button from "../../components/Button";
 import Stat from "../../components/Stat";
 import Tag from "../../components/Tag";
+import { useAuth } from "../../lib/auth";
 
 type Tournament = {
   id: string;
-  name: string;
-  prize: number;
-  spots: number;
-  left: number;
-  countdown: string;
-  mode: "PvP" | "Arcade" | "Skill";
+  title: string;
+  game: string;
+  entryFee: number;
+  prizePool: number;
+  status: string;
+  startsAt?: string;
 };
 
-const seedTournaments: Tournament[] = [
-  { id: "mega", name: "Mega Cup", prize: 2500, spots: 128, left: 36, countdown: "18:42", mode: "PvP" },
-  { id: "sprint", name: "Sprint Clash", prize: 1200, spots: 64, left: 12, countdown: "09:10", mode: "Skill" },
-  { id: "rush", name: "Reaction Rush", prize: 800, spots: 48, left: 5, countdown: "04:55", mode: "Arcade" },
-  { id: "strategy", name: "Strategy Arena", prize: 1500, spots: 96, left: 44, countdown: "26:10", mode: "PvP" }
-];
-
 export default function TournamentsPage() {
-  const [tournaments, setTournaments] = useState(seedTournaments);
-  const [livePrize, setLivePrize] = useState(5400);
+  const { authFetch, user } = useAuth();
+  const [tournaments, setTournaments] = useState<Tournament[]>([]);
+  const [livePrize, setLivePrize] = useState(0);
   const [joined, setJoined] = useState(0);
+  const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      setTournaments((prev) =>
-        prev.map((t) => ({
-          ...t,
-          left: Math.max(0, t.left - Math.floor(Math.random() * 3)),
-          prize: t.prize + Math.floor(Math.random() * 40)
-        }))
-      );
-      setLivePrize((p) => p + Math.floor(Math.random() * 60));
-      setJoined((j) => j + Math.floor(Math.random() * 5));
-    }, 2200);
-    return () => clearInterval(timer);
-  }, []);
+    setLoading(true);
+    authFetch<{ tournaments: Tournament[] }>("/tournaments")
+      .then((data) => {
+        setTournaments(data.tournaments || []);
+        setLivePrize((data.tournaments || []).reduce((sum, t) => sum + Number(t.prizePool || 0), 0));
+      })
+      .catch(() => undefined)
+      .finally(() => setLoading(false));
+  }, [authFetch]);
 
   const duplicated = useMemo(() => [...tournaments, ...tournaments], [tournaments]);
 
@@ -60,8 +52,8 @@ export default function TournamentsPage() {
             </div>
           </div>
           <div className="mt-6 grid gap-4 md:grid-cols-2">
-            {tournaments.map((t) => {
-              const progress = ((t.spots - t.left) / t.spots) * 100;
+            {(tournaments.length ? tournaments : []).map((t) => {
+              const progress = 50;
               return (
                 <div key={t.id} className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/5 p-4">
                   <div className="absolute inset-0 bg-gradient-to-br from-neonPurple/12 via-neon/10 to-neonCyan/12" />
@@ -69,14 +61,14 @@ export default function TournamentsPage() {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <span className="rounded-full bg-white/10 px-3 py-1 text-[11px] uppercase tracking-[0.2em] text-slate-200">
-                          {t.mode}
+                          {t.game}
                         </span>
-                        <p className="text-lg font-[var(--font-display)] text-white">{t.name}</p>
+                        <p className="text-lg font-[var(--font-display)] text-white">{t.title}</p>
                       </div>
-                      <span className="text-neon text-sm">${t.prize.toLocaleString()}</span>
+                      <span className="text-neon text-sm">${Number(t.prizePool || 0).toLocaleString()}</span>
                     </div>
                     <p className="text-sm text-slate-300">
-                      {t.spots} spots · {t.left} left · Countdown {t.countdown}
+                      Entry {Number(t.entryFee || 0)} · Status {t.status}
                     </p>
                     <div className="h-2 rounded-full bg-white/10">
                       <div
@@ -85,10 +77,19 @@ export default function TournamentsPage() {
                       />
                     </div>
                     <div className="flex items-center justify-between text-xs text-slate-300">
-                      <span>Progress</span>
-                      <span className="text-white">{Math.round(progress)}%</span>
+                      <span>Prize Pool</span>
+                      <span className="text-white">${Number(t.prizePool || 0)}</span>
                     </div>
-                    <Button>Join Tournament</Button>
+                    <Button
+                      onClick={async () => {
+                        if (!user) return;
+                        await authFetch(`/tournaments/${t.id}/join`, { method: "POST" });
+                        alert("Joined");
+                      }}
+                      disabled={loading}
+                    >
+                      Join Tournament
+                    </Button>
                   </div>
                 </div>
               );
