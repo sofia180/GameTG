@@ -13,7 +13,8 @@ const games = [
   { id: "chess", label: "Chess" },
   { id: "checkers", label: "Checkers" },
   { id: "tictactoe", label: "Tic Tac Toe" },
-  { id: "battleship", label: "Battleship" }
+  { id: "battleship", label: "Battleship" },
+  { id: "durak", label: "Durak" }
 ] as const;
 
 export default function LobbyPage() {
