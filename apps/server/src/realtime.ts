@@ -118,6 +118,10 @@ export function attachRealtime(
     if (winner === "p1") winnerId = player1Id;
     if (winner === "p2") winnerId = player2Id ?? null;
 
+    // idempotent guard: if already finished in DB, skip payouts
+    const existing = await prisma.gameRoom.findUnique({ where: { id: session.roomId }, select: { status: true, winnerId: true } });
+    if (existing?.status === "finished" || existing?.status === "cancelled") return;
+
     await prisma.gameRoom.update({
       where: { id: session.roomId },
       data: {
@@ -127,9 +131,11 @@ export function attachRealtime(
     });
 
     if (!winnerId || !player2Id) {
-      await walletService.refundBet(player1Id, session.stake, { roomId: session.roomId, reason });
+      // Refund locked stakes
+      const refMeta = { roomId: session.roomId, reason };
+      await walletService.refundBet(player1Id, session.stake, refMeta);
       if (player2Id) {
-        await walletService.refundBet(player2Id, session.stake, { roomId: session.roomId, reason });
+        await walletService.refundBet(player2Id, session.stake, refMeta);
       }
       io.to(session.roomId).emit("game_end", { winner: null, reason });
       return;
