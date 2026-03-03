@@ -146,6 +146,56 @@ export default function GameRoomPage() {
       );
     }
 
+    if (gameType === "durak") {
+      const isAttacker = state?.attacker === player;
+      const myHand = state?.hands?.[player === "p1" ? "p1" : "p2"] ?? [];
+      const table = state?.table ?? [];
+      const trump = state?.trump;
+      const playCard = (card: string) => sendMove({ type: "attack", card });
+      const defend = (attackCard: string, defenseCard: string) => sendMove({ type: "defend", attackCard, defenseCard });
+      return (
+        <div className="space-y-3">
+          <p className="text-sm text-slate-300">Durak · Trump: {trump} · You are {player}</p>
+          <div className="flex flex-wrap gap-2">
+            {table.map((p: any, idx: number) => (
+              <div key={idx} className="rounded-lg bg-white/5 px-3 py-2">
+                <div>Attack: {p.attack}</div>
+                <div>Defense: {p.defense ?? "-"}</div>
+                {isAttacker && !p.defense && (
+                  <div className="flex gap-1 mt-1">
+                    {myHand.map((c: string) => (
+                      <button key={c} className="rounded border border-white/20 px-2 text-xs" onClick={() => defend(p.attack, c)}>
+                        {c}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {myHand.map((c: string) => (
+              <button
+                key={c}
+                className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-sm hover:border-neon"
+                onClick={() => (isAttacker ? playCard(c) : undefined)}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={() => sendMove({ type: "take" })}>
+              Take
+            </Button>
+            <Button variant="ghost" onClick={() => sendMove({ type: "end_turn" })}>
+              End Turn
+            </Button>
+          </div>
+        </div>
+      );
+    }
+
     if (gameType === "checkers") {
       return (
         <div className="grid grid-cols-8 gap-1">
@@ -246,6 +296,129 @@ export default function GameRoomPage() {
               </div>
             </div>
           </div>
+        </div>
+      );
+    }
+
+    if (gameType === "durak") {
+      const isAttacker = state?.attacker === player;
+      const myHand = state?.hands?.[player ?? "p1"] ?? [];
+      const table = state?.table ?? [];
+      const trump = state?.trump;
+      const playCard = (card: string) => sendMove({ type: "attack", card });
+      const defend = (attackCard: string, defenseCard: string) => sendMove({ type: "defend", attackCard, defenseCard });
+      return (
+        <div className="space-y-3">
+          <p className="text-sm text-slate-300">Durak · Trump: {trump} · You are {player}</p>
+          <div className="flex flex-wrap gap-2">
+            {table.map((p: any, idx: number) => (
+              <div key={idx} className="rounded-lg bg-white/5 px-3 py-2">
+                <div>Attack: {p.attack}</div>
+                <div>Defense: {p.defense ?? "-"}</div>
+                {!p.defense && !isAttacker && (
+                  <div className="flex gap-1 mt-1">
+                    {myHand.map((c: string) => (
+                      <button key={c} className="rounded border border-white/20 px-2 text-xs" onClick={() => defend(p.attack, c)}>
+                        {c}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {myHand.map((c: string) => (
+              <button
+                key={c}
+                className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-sm hover:border-neon"
+                onClick={() => (isAttacker ? playCard(c) : undefined)}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" onClick={() => sendMove({ type: "take" })}>
+              Take
+            </Button>
+            <Button variant="ghost" onClick={() => sendMove({ type: "end_turn" })}>
+              End Turn
+            </Button>
+          </div>
+        </div>
+      );
+    }
+
+    if (gameType === "mafia") {
+      const me = state.players?.find((p: any) => p.id === player);
+      return (
+        <div className="space-y-3">
+          <p className="text-sm text-slate-300">Mafia · You: {player}</p>
+          <p className="text-sm text-white">Role: {me?.role || "hidden"}</p>
+          <div className="text-xs text-slate-400">Phase: {state.phase}</div>
+          <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-sm text-slate-200">
+            Alive: {(state.players || []).filter((p: any) => p.alive).map((p: any) => p.id).join(", ")}
+          </div>
+          {state.phase === "night" && me?.role === "mafia" && (
+            <div className="space-y-2">
+              <p className="text-sm text-white">Choose target</p>
+              <div className="flex flex-wrap gap-2">
+                {(state.players || [])
+                  .filter((p: any) => p.alive && p.id !== me.id)
+                  .map((p: any) => (
+                    <button key={p.id} className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "mafia_target", target: p.id })}>
+                      {p.id}
+                    </button>
+                  ))}
+              </div>
+            </div>
+          )}
+          {state.phase === "night" && me?.role === "doctor" && (
+            <div className="space-y-2">
+              <p className="text-sm text-white">Save player</p>
+              <div className="flex flex-wrap gap-2">
+                {(state.players || []).filter((p: any) => p.alive).map((p: any) => (
+                  <button key={p.id} className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "doctor_save", target: p.id })}>
+                    {p.id}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {state.phase === "night" && me?.role === "detective" && (
+            <div className="space-y-2">
+              <p className="text-sm text-white">Check player</p>
+              <div className="flex flex-wrap gap-2">
+                {(state.players || [])
+                  .filter((p: any) => p.alive && p.id !== me.id)
+                  .map((p: any) => (
+                    <button key={p.id} className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "detective_check", target: p.id })}>
+                      {p.id}
+                    </button>
+                  ))}
+              </div>
+            </div>
+          )}
+          {state.phase === "day" && (
+            <div className="space-y-2">
+              <p className="text-sm text-white">Vote to kick</p>
+              <div className="flex flex-wrap gap-2">
+                {(state.players || [])
+                  .filter((p: any) => p.alive && p.id !== me?.id)
+                  .map((p: any) => (
+                    <button key={p.id} className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "vote", target: p.id })}>
+                      {p.id}
+                    </button>
+                  ))}
+                <button className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "vote", target: null })}>Skip</button>
+              </div>
+              <Button variant="ghost" onClick={() => sendMove({ type: "advance_day" })}>Advance day</Button>
+            </div>
+          )}
+          {state.phase === "night" && (
+            <Button variant="ghost" onClick={() => sendMove({ type: "advance_night" })}>Advance night</Button>
+          )}
         </div>
       );
     }
