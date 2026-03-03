@@ -28,6 +28,18 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+app.get("/games", (_req, res) => {
+  res.json({
+    games: [
+      { id: 1, name: "Blitz Chess", type: "strategy", status: "live", players_online: 342, prize_pool: 250, difficulty: "Medium", tags: ["featured", "trending"] },
+      { id: 2, name: "Reaction Duel", type: "reaction", status: "live", players_online: 290, prize_pool: 120, difficulty: "Easy", tags: ["featured"] },
+      { id: 3, name: "Quick Strategy Battle", type: "strategy", status: "live", players_online: 180, prize_pool: 180, difficulty: "Hard", tags: ["trending"] },
+      { id: 4, name: "Arcade Score Challenge", type: "arcade", status: "live", players_online: 210, prize_pool: 90, difficulty: "Medium", tags: ["new"] },
+      { id: 5, name: "Duel Rush", type: "duel", status: "live", players_online: 150, prize_pool: 110, difficulty: "Medium", tags: ["trending"] }
+    ]
+  });
+});
+
 app.post("/auth/telegram", async (req, res) => {
   const { initData, referralCode } = req.body as { initData: string; referralCode?: string };
   if (!initData) return res.status(400).json({ error: "Missing initData" });
