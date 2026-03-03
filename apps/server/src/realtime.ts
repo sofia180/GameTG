@@ -17,9 +17,12 @@ interface RoomSession {
   player1: { userId: string; socketId: string };
   player2?: { userId: string; socketId: string };
   engine: ReturnType<typeof createGameEngine> | null;
+  waitTimer?: NodeJS.Timeout;
 }
 
 const generateRoomCode = () => Math.random().toString(36).slice(2, 8).toUpperCase();
+
+const WAIT_TIMEOUT_MS = 60_000; // 60s waiting room timeout
 
 const deepClone = <T>(data: T): T => JSON.parse(JSON.stringify(data));
 
@@ -67,6 +70,10 @@ export function attachRealtime(
   };
 
   const startGame = async (session: RoomSession) => {
+    if (session.waitTimer) {
+      clearTimeout(session.waitTimer);
+      session.waitTimer = undefined;
+    }
     session.engine = createGameEngine(session.gameType);
     session.status = "active";
 
@@ -186,6 +193,12 @@ export function attachRealtime(
       engine: null
     };
 
+    // auto-timeout waiting room to avoid stuck locked stakes
+    session.waitTimer = setTimeout(async () => {
+      if (session.status !== "waiting") return;
+      await endGame(session, null, "timeout_waiting");
+    }, 60_000);
+
     sessions.set(room.id, session);
     sessionsByCode.set(roomCode, session);
     socket.join(room.id);
@@ -269,6 +282,11 @@ export function attachRealtime(
         await walletService.lockForBet(userId, session.stake, { gameType: session.gameType, roomCode: session.roomCode });
         session.player2 = { userId, socketId: socket.id };
 
+        if (session.waitTimer) {
+          clearTimeout(session.waitTimer);
+          session.waitTimer = undefined;
+        }
+
         await prisma.gameRoom.update({
           where: { id: session.roomId },
           data: { player2Id: userId, status: "active" }
@@ -299,6 +317,11 @@ export function attachRealtime(
 
         await walletService.lockForBet(userId, stake, { gameType, roomCode: session.roomCode });
         session.player2 = { userId, socketId: socket.id };
+
+        if (session.waitTimer) {
+          clearTimeout(session.waitTimer);
+          session.waitTimer = undefined;
+        }
 
         await prisma.gameRoom.update({
           where: { id: session.roomId },
