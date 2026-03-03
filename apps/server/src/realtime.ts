@@ -4,7 +4,7 @@ import type { PrismaClient } from "@prisma/client";
 import { MatchmakingService } from "@modules/matchmaking";
 import { WalletService } from "@modules/wallet";
 import { computePlatformFee, computeReferralRewardFromFee } from "@modules/referral";
-import { createGameEngine, type GameType, type PlayerId } from "./games/registry";
+import { createGameEngine, createGameEngineWithPlayers, type GameType, type PlayerId } from "./games/registry";
 import { verifyJwt } from "./auth/jwt";
 
 interface RoomSession {
@@ -26,8 +26,8 @@ const WAIT_TIMEOUT_MS = 60_000; // 60s waiting room timeout
 
 const deepClone = <T>(data: T): T => JSON.parse(JSON.stringify(data));
 
-function sanitizeState(gameType: GameType, state: any, viewer: PlayerId) {
-  if (gameType !== "battleship") return state;
+function sanitizeState(gameType: GameType, state: any, viewer: PlayerId | string) {
+  if (gameType === "battleship") {
   const copy = deepClone(state);
   const opponent: PlayerId = viewer === "p1" ? "p2" : "p1";
   const board = copy.boards?.[opponent];
@@ -38,7 +38,19 @@ function sanitizeState(gameType: GameType, state: any, viewer: PlayerId) {
       }
     }
   }
-  return copy;
+    return copy;
+  }
+  if (gameType === "mafia") {
+    // Hide roles except for own role; detective info is passed as flag per move
+    const copy = deepClone(state);
+    if (copy.players) {
+      copy.players = copy.players.map((p: any) =>
+        p.id === viewer ? p : { ...p, role: p.revealed ? p.role : undefined }
+      );
+    }
+    return copy;
+  }
+  return state;
 }
 
 export function attachRealtime(
@@ -74,7 +86,12 @@ export function attachRealtime(
       clearTimeout(session.waitTimer);
       session.waitTimer = undefined;
     }
-    session.engine = createGameEngine(session.gameType);
+    if (session.gameType === "mafia") {
+      const playerIds = [session.player1.userId, session.player2?.userId].filter(Boolean) as string[];
+      session.engine = createGameEngineWithPlayers(session.gameType, playerIds);
+    } else {
+      session.engine = createGameEngine(session.gameType);
+    }
     session.status = "active";
 
     await prisma.gameRoom.update({
