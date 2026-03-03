@@ -1,0 +1,2 @@
+-- Migration stub (schema changes already in schema.prisma).
+-- Run `pnpm prisma migrate deploy` in CI/Deploy to apply on prod.

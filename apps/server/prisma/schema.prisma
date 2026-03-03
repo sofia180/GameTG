@@ -34,6 +34,67 @@ enum GameType {
   checkers
   tictactoe
   battleship
+  durak
+  mafia
+}
+
+enum TournamentStatus {
+  draft
+  active
+  completed
+  cancelled
+}
+
+model Tournament {
+  id         String            @id @default(uuid())
+  title      String
+  game       String
+  entryFee   Decimal           @default(0)
+  prizePool  Decimal           @default(0)
+  status     TournamentStatus  @default(draft)
+  bracket    Json?
+  startsAt   DateTime?
+  createdAt  DateTime          @default(now())
+  createdById String?
+
+  createdBy  User?             @relation(fields: [createdById], references: [id])
+  participants TournamentParticipant[]
+  matches    TournamentMatch[]
+}
+
+model TournamentParticipant {
+  id            String   @id @default(uuid())
+  tournamentId  String
+  userId        String
+  seed          Int?
+  paid          Boolean  @default(false)
+  eliminated    Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id])
+  user       User       @relation(fields: [userId], references: [id])
+
+  @@unique([tournamentId, userId])
+  @@index([tournamentId, paid])
+}
+
+model TournamentMatch {
+  id            String   @id @default(uuid())
+  tournamentId  String
+  round         Int
+  player1Id     String?
+  player2Id     String?
+  winnerId      String?
+  report        Json?
+  externalMatchId String?
+  createdAt     DateTime @default(now())
+
+  tournament Tournament @relation(fields: [tournamentId], references: [id])
+  player1    User?      @relation("TM_P1", fields: [player1Id], references: [id])
+  player2    User?      @relation("TM_P2", fields: [player2Id], references: [id])
+  winner     User?      @relation("TM_Winner", fields: [winnerId], references: [id])
+
+  @@index([tournamentId, round])
 }
 
 model User {
