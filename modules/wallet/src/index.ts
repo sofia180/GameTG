@@ -45,6 +45,13 @@ export class WalletService {
         throw new Error("Insufficient balance");
       }
 
+      // prevent double-lock with same reference
+      const refId = metadata && (metadata as any).roomId ? `bet:${(metadata as any).roomId}:${userId}` : undefined;
+      if (refId) {
+        const existing = await tx.transaction.findUnique({ where: { referenceId: refId } });
+        if (existing) return { wallet, transaction: existing };
+      }
+
       const updated = await tx.wallet.update({
         where: { userId },
         data: { balance: { decrement: amount } }
@@ -56,7 +63,8 @@ export class WalletService {
           type: "bet",
           amount,
           status: "locked",
-          metadata
+          metadata,
+          referenceId: refId
         }
       });
 
@@ -89,6 +97,12 @@ export class WalletService {
   async settleWin(userId: string, amount: number, metadata?: Record<string, unknown>) {
     if (amount <= 0) throw new Error("Invalid amount");
     return this.prisma.$transaction(async (tx) => {
+      const refId = metadata && (metadata as any).roomId ? `win:${(metadata as any).roomId}:${userId}` : undefined;
+      if (refId) {
+        const existing = await tx.transaction.findUnique({ where: { referenceId: refId } });
+        if (existing) return { wallet: await tx.wallet.findUnique({ where: { userId } }), transaction: existing };
+      }
+
       const wallet = await tx.wallet.update({
         where: { userId },
         data: { balance: { increment: amount } }
@@ -100,7 +114,8 @@ export class WalletService {
           type: "win",
           amount,
           status: "completed",
-          metadata
+          metadata,
+          referenceId: refId
         }
       });
 
