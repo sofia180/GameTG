@@ -40,6 +40,11 @@ app.get("/games", (_req, res) => {
   });
 });
 
+// Keep compatibility with frontend that may call /api/games
+app.get("/api/games", (_req, res) => {
+  res.redirect(307, "/games");
+});
+
 app.post("/auth/telegram", async (req, res) => {
   const { initData, referralCode } = req.body as { initData: string; referralCode?: string };
   if (!initData) return res.status(400).json({ error: "Missing initData" });
