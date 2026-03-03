@@ -12,6 +12,7 @@ import { attachRealtime } from "./realtime";
 import { parseInitData, verifyTelegramInitData } from "./auth/telegram";
 import { signJwt } from "./auth/jwt";
 import { getLeaderboard } from "@modules/leaderboard";
+import { TournamentService } from "./tournaments/service";
 
 const app = express();
 app.use(cors({ origin: "*" }));
@@ -19,6 +20,7 @@ app.use(express.json());
 
 const walletService = new WalletService(prisma);
 const matchmaking = new MatchmakingService();
+const tournamentService = new TournamentService(prisma, walletService);
 const crypto = new CryptoRouter();
 crypto.register(new MockAdapter("USDT"));
 crypto.register(new MockAdapter("ETH"));
@@ -43,6 +45,41 @@ app.get("/games", (_req, res) => {
 // Keep compatibility with frontend that may call /api/games
 app.get("/api/games", (_req, res) => {
   res.redirect(307, "/games");
+});
+
+// Tournaments API (minimal)
+app.get("/tournaments", async (_req, res) => {
+  const list = await tournamentService.list();
+  res.json({ tournaments: list });
+});
+
+app.get("/tournaments/:id", async (req, res) => {
+  const t = await tournamentService.get(req.params.id);
+  if (!t) return res.status(404).json({ error: "Not found" });
+  res.json({ tournament: t });
+});
+
+app.post("/tournaments", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  if (req.user?.id !== config.adminApiKey && req.headers["x-admin-key"] !== config.adminApiKey) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  const { title, game, entryFee, prizePool, startsAt } = req.body;
+  const t = await tournamentService.create({ title, game, entryFee: Number(entryFee ?? 0), prizePool: prizePool ? Number(prizePool) : undefined, startsAt: startsAt ? new Date(startsAt) : undefined, createdById: req.user?.id });
+  res.json({ tournament: t });
+});
+
+app.post("/tournaments/:id/join", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  const t = await tournamentService.join(req.params.id, req.user!.id);
+  res.json({ participant: t });
+});
+
+app.post("/tournaments/:id/report", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  if (req.user?.id !== config.adminApiKey && req.headers["x-admin-key"] !== config.adminApiKey) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  const { matchId, winnerId, report } = req.body;
+  const m = await tournamentService.reportMatch(req.params.id, matchId, winnerId, report);
+  res.json({ match: m });
 });
 
 app.post("/auth/telegram", async (req, res) => {
