@@ -1,7 +1,7 @@
 import type { Server as HttpServer } from "http";
 import { Server as SocketServer } from "socket.io";
 import type { PrismaClient } from "@prisma/client";
-import { MatchmakingService } from "@modules/matchmaking";
+import { MatchmakingService, type MatchmakingEntry } from "@modules/matchmaking";
 import { WalletService } from "@modules/wallet";
 import { computePlatformFee, computeReferralRewardFromFee } from "@modules/referral";
 import { createGameEngine, createGameEngineWithPlayers, type GameType, type PlayerId } from "./games/registry";
@@ -16,13 +16,36 @@ interface RoomSession {
   isPrivate: boolean;
   player1: { userId: string; socketId: string };
   player2?: { userId: string; socketId: string };
-  engine: ReturnType<typeof createGameEngine> | null;
+  participants: { userId: string; socketId: string; slot?: PlayerId }[];
+  engine: ReturnType<typeof createGameEngine> | ReturnType<typeof createGameEngineWithPlayers> | null;
   waitTimer?: NodeJS.Timeout;
+  startTimer?: NodeJS.Timeout;
 }
 
 const generateRoomCode = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 
-const WAIT_TIMEOUT_MS = 60_000; // 60s waiting room timeout
+const WAIT_TIMEOUT_MS = 60_000; // 60s waiting room timeout for 1v1
+const MAFIA_WAIT_TIMEOUT_MS = 90_000;
+const AMONGUS_WAIT_TIMEOUT_MS = 90_000;
+const QUEUE_MIN_1V1 = 2;
+const QUEUE_MAX_1V1 = 2; // extendable for party games
+const MAFIA_MIN_PLAYERS = 5;
+const MAFIA_MAX_PLAYERS = 10;
+const AMONGUS_MIN_PLAYERS = 4;
+const AMONGUS_MAX_PLAYERS = 10;
+const MAFIA_START_DELAY_MS = 6_000; // allow a few seconds to top-up lobby once minimum reached
+const AMONGUS_START_DELAY_MS = 6_000;
+const HEARTBEAT_GRACE_MS = 20_000;
+const MOVE_COOLDOWN_MS = 250;
+
+const PARTY_GAMES: GameType[] = ["mafia", "amongus"];
+const boundsForGame = (gameType: GameType) => {
+  if (gameType === "mafia") return { min: MAFIA_MIN_PLAYERS, max: MAFIA_MAX_PLAYERS, waitMs: MAFIA_WAIT_TIMEOUT_MS, startDelay: MAFIA_START_DELAY_MS };
+  if (gameType === "amongus") return { min: AMONGUS_MIN_PLAYERS, max: AMONGUS_MAX_PLAYERS, waitMs: AMONGUS_WAIT_TIMEOUT_MS, startDelay: AMONGUS_START_DELAY_MS };
+  return { min: QUEUE_MIN_1V1, max: QUEUE_MAX_1V1, waitMs: WAIT_TIMEOUT_MS, startDelay: 0 };
+};
+
+const isPartyGame = (gameType: GameType) => PARTY_GAMES.includes(gameType);
 
 const deepClone = <T>(data: T): T => JSON.parse(JSON.stringify(data));
 
@@ -50,6 +73,18 @@ function sanitizeState(gameType: GameType, state: any, viewer: PlayerId | string
     }
     return copy;
   }
+  if (gameType === "amongus") {
+    const copy = deepClone(state);
+    if (copy.players) {
+      const self = copy.players.find((p: any) => p.id === viewer);
+      const isImpostor = self?.role === "impostor";
+      copy.players = copy.players.map((p: any) => {
+        const shouldReveal = p.id === viewer || copy.phase === "finished" || (isImpostor && p.role === "impostor");
+        return shouldReveal ? p : { ...p, role: undefined };
+      });
+    }
+    return copy;
+  }
   return state;
 }
 
@@ -68,12 +103,22 @@ export function attachRealtime(
 
   const sessions = new Map<string, RoomSession>();
   const sessionsByCode = new Map<string, RoomSession>();
+  const lastSeen = new Map<string, number>();
+  const lastMoveAt = new Map<string, number>();
 
   const ensureAuthed = (socket: any) => {
     if (!socket.data.userId) throw new Error("Unauthenticated");
   };
 
   const emitState = (session: RoomSession, event: string, payload: Record<string, unknown>) => {
+    if (isPartyGame(session.gameType)) {
+      for (const p of session.participants) {
+        const state = sanitizeState(session.gameType, payload.state, p.userId);
+        io.to(p.socketId).emit(event, { ...payload, state, player: p.userId });
+      }
+      return;
+    }
+
     if (!session.player1 || !session.player2) return;
     const stateP1 = sanitizeState(session.gameType, payload.state, "p1");
     const stateP2 = sanitizeState(session.gameType, payload.state, "p2");
@@ -86,17 +131,26 @@ export function attachRealtime(
       clearTimeout(session.waitTimer);
       session.waitTimer = undefined;
     }
-    if (session.gameType === "mafia") {
-      const playerIds = [session.player1.userId, session.player2?.userId].filter(Boolean) as string[];
-      session.engine = createGameEngineWithPlayers(session.gameType, playerIds);
+    if (session.startTimer) {
+      clearTimeout(session.startTimer);
+      session.startTimer = undefined;
+    }
+
+    if (isPartyGame(session.gameType)) {
+      const bounds = boundsForGame(session.gameType);
+      if (session.participants.length < bounds.min) {
+        throw new Error("Not enough players to start");
+      }
+      session.engine = createGameEngineWithPlayers(session.gameType, session.participants.map((p) => p.userId));
     } else {
+      if (!session.player2) throw new Error("Opponent missing");
       session.engine = createGameEngine(session.gameType);
     }
     session.status = "active";
 
     await prisma.gameRoom.update({
       where: { id: session.roomId },
-      data: { status: "active" }
+      data: { status: "active", player2Id: session.player2?.userId }
     });
 
     emitState(session, "start_game", {
@@ -107,16 +161,13 @@ export function attachRealtime(
     });
   };
 
-  const endGame = async (session: RoomSession, winner: PlayerId | null, reason: string) => {
+  const endGame = async (session: RoomSession, winnerIds: string[], reason: string, payoutMode: "winner_take_all" | "split" = "winner_take_all") => {
     if (session.status === "finished") return;
     session.status = "finished";
 
-    const player1Id = session.player1.userId;
-    const player2Id = session.player2?.userId;
-
-    let winnerId: string | null = null;
-    if (winner === "p1") winnerId = player1Id;
-    if (winner === "p2") winnerId = player2Id ?? null;
+    const participantIds = session.participants.map((p) => p.userId);
+    const uniqueWinners = Array.from(new Set(winnerIds)).filter((id) => participantIds.includes(id));
+    const winnerId = uniqueWinners[0] ?? null;
 
     // idempotent guard: if already finished in DB, skip payouts
     const existing = await prisma.gameRoom.findUnique({ where: { id: session.roomId }, select: { status: true, winnerId: true } });
@@ -129,27 +180,70 @@ export function attachRealtime(
         winnerId
       }
     });
+    // Duo boost + quest progress (only 1v1 games)
+    if (!isPartyGame(session.gameType) && session.player2) {
+      const p1 = session.player1.userId;
+      const p2 = session.player2.userId;
+      const users = await prisma.user.findMany({ where: { id: { in: [p1, p2] } }, select: { id: true, referredById: true } });
+      const u1 = users.find((u) => u.id === p1);
+      const u2 = users.find((u) => u.id === p2);
+      const referralLinked = (u1?.referredById === p2) || (u2?.referredById === p1);
 
-    if (!winnerId || !player2Id) {
-      // Refund locked stakes
-      const refMeta = { roomId: session.roomId, reason };
-      await walletService.refundBet(player1Id, session.stake, refMeta);
-      if (player2Id) {
-        await walletService.refundBet(player2Id, session.stake, refMeta);
+      if (referralLinked) {
+        for (const pid of [p1, p2]) {
+          await prisma.teamQuest.upsert({
+            where: { userId: pid },
+            update: { progress: { increment: 1 } },
+            create: {
+              userId: pid,
+              progress: 1,
+              target: 5,
+              expiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+            }
+          });
+        }
       }
-      io.to(session.roomId).emit("game_end", { winner: null, reason });
+
+      // Duo boost: after 3 matches together, grant boost for both
+      const pairUpdate = async (userId: string, partnerId: string) => {
+        const duo = await prisma.duoBoost.upsert({
+          where: { userId_partnerId: { userId, partnerId } },
+          update: { count: { increment: 1 } },
+          create: { userId, partnerId, count: 1 }
+        });
+        if (!duo.activated && duo.count >= 3) {
+          await prisma.userBoost.create({
+            data: { userId, type: "duo", expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) }
+          });
+          await prisma.duoBoost.update({ where: { id: duo.id }, data: { activated: true } });
+          await walletService.deposit(userId, config.duoBonusReward, { source: "duo_boost", partnerId });
+        }
+      };
+      await pairUpdate(p1, p2);
+      await pairUpdate(p2, p1);
+    }
+
+    if (uniqueWinners.length === 0) {
+      // Refund locked stakes for everyone
+      for (const pid of participantIds) {
+        await walletService.refundBet(pid, session.stake, { roomId: session.roomId, reason });
+      }
+      io.to(session.roomId).emit("game_end", { winner: null, winners: [], reason });
       return;
     }
 
-    const totalPot = session.stake * 2;
+    const totalPot = session.stake * participantIds.length;
     const fee = computePlatformFee(totalPot, feeBps);
     const referralReward = computeReferralRewardFromFee(fee, referralShare);
-    const payout = totalPot - fee;
+    const payoutPool = totalPot - fee;
+    const perWinner = payoutMode === "split" ? payoutPool / uniqueWinners.length : payoutPool;
 
-    await walletService.settleWin(winnerId, payout, { roomId: session.roomId, fee });
+    for (const id of uniqueWinners) {
+      await walletService.settleWin(id, perWinner, { roomId: session.roomId, fee, mode: payoutMode });
+    }
 
     const players = await prisma.user.findMany({
-      where: { id: { in: [player1Id, player2Id] } },
+      where: { id: { in: participantIds } },
       select: { id: true, referredById: true }
     });
     const referrals = players.map((p) => p.referredById).filter((id): id is string => !!id);
@@ -158,7 +252,7 @@ export function attachRealtime(
       const perReferrer = Number((referralReward / referrals.length).toFixed(8));
       for (const referrerId of referrals) {
         await prisma.referralReward.create({
-          data: { referrerId, userId: winnerId, amount: perReferrer }
+          data: { referrerId, userId: winnerId ?? uniqueWinners[0], amount: perReferrer }
         });
         await walletService.deposit(referrerId, perReferrer, {
           source: "referral",
@@ -169,7 +263,8 @@ export function attachRealtime(
 
     io.to(session.roomId).emit("game_end", {
       winner: winnerId,
-      payout,
+      winners: uniqueWinners,
+      payout: payoutMode === "split" ? perWinner : payoutPool,
       fee,
       referralReward,
       reason
@@ -192,8 +287,6 @@ export function attachRealtime(
     if (stake <= 0) throw new Error("Invalid stake");
     const roomCode = generateRoomCode();
 
-    await walletService.lockForBet(userId, stake, { gameType, roomCode });
-
     const room = await prisma.gameRoom.create({
       data: {
         gameType,
@@ -205,6 +298,8 @@ export function attachRealtime(
       }
     });
 
+    await walletService.lockForBet(userId, stake, { gameType, roomCode, roomId: room.id });
+
     const session: RoomSession = {
       roomId: room.id,
       roomCode,
@@ -213,23 +308,21 @@ export function attachRealtime(
       status: "waiting",
       isPrivate,
       player1: { userId, socketId: socket.id },
+      participants: [{ userId, socketId: socket.id, slot: "p1" }],
       engine: null
     };
 
     // auto-timeout waiting room to avoid stuck locked stakes
     session.waitTimer = setTimeout(async () => {
       if (session.status !== "waiting") return;
-      await endGame(session, null, "timeout_waiting");
-    }, 60_000);
+      await endGame(session, [], "timeout_waiting");
+    }, boundsForGame(gameType).waitMs);
 
     sessions.set(room.id, session);
     sessionsByCode.set(roomCode, session);
     socket.join(room.id);
 
     socket.emit("room_created", { roomId: room.id, roomCode, isPrivate });
-    if (!isPrivate) {
-      matchmaking.enqueue({ roomId: room.id, userId, socketId: socket.id, stake, gameType, createdAt: Date.now() });
-    }
 
     return session;
   };
@@ -249,9 +342,14 @@ export function attachRealtime(
         }
         socket.data.userId = payload.sub;
         socket.emit("authenticated", { ok: true, userId: payload.sub });
+        lastSeen.set(socket.id, Date.now());
       } catch {
         socket.emit("error", { message: "Invalid token" });
       }
+    });
+
+    socket.on("heartbeat", () => {
+      lastSeen.set(socket.id, Date.now());
     });
 
     socket.on("create_room", async ({ gameType, stake, isPrivate }: { gameType: GameType; stake: number; isPrivate: boolean }) => {
@@ -272,8 +370,11 @@ export function attachRealtime(
         if (session.isPrivate && session.roomCode !== roomCode) throw new Error("Room is private");
 
         const userId = socket.data.userId as string;
-        if (session.player1.userId === userId) {
-          session.player1.socketId = socket.id;
+        const already = session.participants.find((p) => p.userId === userId);
+        if (already) {
+          already.socketId = socket.id;
+          if (session.player1.userId === userId) session.player1.socketId = socket.id;
+          if (session.player2?.userId === userId) session.player2.socketId = socket.id;
           socket.join(session.roomId);
           if (session.engine) {
             emitState(session, "start_game", {
@@ -286,24 +387,30 @@ export function attachRealtime(
           return;
         }
 
-        if (session.player2?.userId === userId) {
-          session.player2.socketId = socket.id;
+        if (isPartyGame(session.gameType)) {
+          const bounds = boundsForGame(session.gameType);
+          if (session.participants.length >= bounds.max) throw new Error("Room is full");
+          await walletService.lockForBet(userId, session.stake, { gameType: session.gameType, roomCode: session.roomCode, roomId: session.roomId });
+          session.participants.push({ userId, socketId: socket.id });
+          if (!session.player2) session.player2 = { userId, socketId: socket.id }; // compatibility for legacy consumer
           socket.join(session.roomId);
-          if (session.engine) {
-            emitState(session, "start_game", {
-              roomId: session.roomId,
-              gameType: session.gameType,
-              stake: session.stake,
-              state: session.engine.state
-            });
+          io.to(session.roomId).emit("lobby_update", { roomId: session.roomId, count: session.participants.length });
+
+          // Start once minimum reached with short buffer, or immediately at cap
+          if (session.participants.length >= bounds.min && !session.startTimer) {
+            session.startTimer = setTimeout(() => startGame(session).catch(console.error), bounds.startDelay);
+          }
+          if (session.participants.length === bounds.max) {
+            await startGame(session);
           }
           return;
         }
 
         if (session.player2) throw new Error("Room is full");
 
-        await walletService.lockForBet(userId, session.stake, { gameType: session.gameType, roomCode: session.roomCode });
+        await walletService.lockForBet(userId, session.stake, { gameType: session.gameType, roomCode: session.roomCode, roomId: session.roomId });
         session.player2 = { userId, socketId: socket.id };
+        session.participants.push({ userId, socketId: socket.id });
 
         if (session.waitTimer) {
           clearTimeout(session.waitTimer);
@@ -327,33 +434,81 @@ export function attachRealtime(
       try {
         ensureAuthed(socket);
         const userId = socket.data.userId as string;
-        const match = matchmaking.dequeueMatch(gameType, stake);
-        if (!match) {
-          await createRoomForUser({ socket, userId, gameType, stake, isPrivate: false });
+        const bounds = boundsForGame(gameType);
+        const ticket: MatchmakingEntry = { socketId: socket.id, userId, gameType, stake, createdAt: Date.now() };
+
+        if (bounds.max === 2) {
+          const opponent = matchmaking.dequeueMatch(gameType, stake);
+          if (!opponent) {
+            matchmaking.enqueue(ticket);
+            socket.emit("match_waiting", { gameType, stake });
+            return;
+          }
+
+          const hostTicket = opponent;
+          const hostSocket = hostTicket.userId === userId ? socket : io.sockets.sockets.get(hostTicket.socketId);
+          if (!hostSocket && hostTicket.userId !== userId) {
+            // opponent disconnected, re-queue them and wait
+            matchmaking.enqueue(hostTicket);
+            matchmaking.enqueue(ticket);
+            socket.emit("match_waiting", { gameType, stake });
+            return;
+          }
+          const session = await createRoomForUser({ socket: hostSocket ?? socket, userId: hostTicket.userId, gameType, stake, isPrivate: false });
+
+          // current player joins as second
+          await walletService.lockForBet(userId, stake, { gameType, roomCode: session.roomCode, roomId: session.roomId });
+          session.player2 = { userId, socketId: socket.id };
+          session.participants.push({ userId, socketId: socket.id, slot: "p2" });
+
+          if (session.waitTimer) {
+            clearTimeout(session.waitTimer);
+            session.waitTimer = undefined;
+          }
+
+          await prisma.gameRoom.update({
+            where: { id: session.roomId },
+            data: { player2Id: userId, status: "active" }
+          });
+
+          socket.join(session.roomId);
+          io.to(session.roomId).emit("match_found", { roomId: session.roomId, roomCode: session.roomCode });
+          await startGame(session);
+          return;
+        }
+
+        // multiplayer queue (party games)
+        const group = matchmaking.dequeueGroup({ gameType, stake, min: bounds.min - 1, max: bounds.max - 1 });
+        if (!group) {
+          matchmaking.enqueue(ticket);
           socket.emit("match_waiting", { gameType, stake });
           return;
         }
 
-        const session = sessions.get(match.roomId);
-        if (!session) throw new Error("Room expired");
-        if (session.player1.userId === userId) throw new Error("Cannot join your own room");
+        const members = [...group, ticket].filter(
+          (m, idx, arr) => arr.findIndex((x) => x.userId === m.userId) === idx
+        );
 
-        await walletService.lockForBet(userId, stake, { gameType, roomCode: session.roomCode });
-        session.player2 = { userId, socketId: socket.id };
+        const session = await createRoomForUser({ socket, userId, gameType, stake, isPrivate: false });
 
-        if (session.waitTimer) {
-          clearTimeout(session.waitTimer);
-          session.waitTimer = undefined;
+        for (const m of members) {
+          if (m.userId === userId) continue; // host already added
+          const memberSocket = io.sockets.sockets.get(m.socketId);
+          if (!memberSocket) continue;
+          await walletService.lockForBet(m.userId, stake, { gameType, roomCode: session.roomCode, roomId: session.roomId });
+          session.participants.push({ userId: m.userId, socketId: memberSocket.id });
+          memberSocket.join(session.roomId);
         }
 
-        await prisma.gameRoom.update({
-          where: { id: session.roomId },
-          data: { player2Id: userId, status: "active" }
-        });
-
-        socket.join(session.roomId);
-        io.to(session.roomId).emit("match_found", { roomId: session.roomId, roomCode: session.roomCode });
-        await startGame(session);
+        io.to(session.roomId).emit("lobby_update", { roomId: session.roomId, count: session.participants.length });
+        if (session.participants.length >= bounds.min && !session.startTimer) {
+          session.startTimer = setTimeout(() => startGame(session).catch(console.error), bounds.startDelay);
+        }
+        if (session.participants.length === bounds.max) {
+          await startGame(session);
+        } else {
+          io.to(session.roomId).emit("match_found", { roomId: session.roomId, roomCode: session.roomCode, players: session.participants.length });
+        }
       } catch (error: any) {
         socket.emit("error", { message: error.message ?? "Failed to join random" });
       }
@@ -365,7 +520,34 @@ export function attachRealtime(
         const session = sessions.get(roomId);
         if (!session || !session.engine) throw new Error("Room not active");
 
+        const now = Date.now();
+        const prev = lastMoveAt.get(socket.id) ?? 0;
+        if (now - prev < MOVE_COOLDOWN_MS) {
+          socket.emit("move_rejected", { reason: "rate_limited" });
+          return;
+        }
+        lastMoveAt.set(socket.id, now);
+
         const userId = socket.data.userId as string;
+        if (isPartyGame(session.gameType)) {
+          const participant = session.participants.find((p) => p.userId === userId);
+          if (!participant) throw new Error("Not a participant");
+          const result = session.engine.applyMove(userId, move);
+          if (!result.valid) {
+            socket.emit("move_rejected", { reason: result.error });
+            return;
+          }
+          await prisma.gameMove.create({ data: { gameId: roomId, playerId: userId, move: move as any } });
+          emitState(session, "move", { player: userId, move, state: result.state });
+
+          if (result.outcome?.status === "win") {
+            await endGame(session, result.outcome.winners ?? [userId], "win", "split");
+          } else if (result.outcome?.status === "draw") {
+            await endGame(session, [], "draw");
+          }
+          return;
+        }
+
         const player: PlayerId | null = session.player1.userId === userId ? "p1" : session.player2?.userId === userId ? "p2" : null;
         if (!player) throw new Error("Not a participant");
 
@@ -382,9 +564,10 @@ export function attachRealtime(
         emitState(session, "move", { player, move, state: result.state });
 
         if (result.outcome?.status === "win") {
-          await endGame(session, result.outcome.winner ?? player, "win");
+          const winnerId = result.outcome.winner === "p1" ? session.player1.userId : session.player2?.userId;
+          await endGame(session, winnerId ? [winnerId] : [], "win");
         } else if (result.outcome?.status === "draw") {
-          await endGame(session, null, "draw");
+          await endGame(session, [], "draw");
         }
       } catch (error: any) {
         socket.emit("error", { message: error.message ?? "Move failed" });
@@ -393,20 +576,52 @@ export function attachRealtime(
 
     socket.on("disconnect", async () => {
       matchmaking.removeBySocket(socket.id);
+      lastSeen.delete(socket.id);
+      lastMoveAt.delete(socket.id);
       for (const session of sessions.values()) {
         if (session.status === "finished") continue;
+        const participant = session.participants.find((p) => p.socketId === socket.id);
+        if (!participant) continue;
+
+        if (isPartyGame(session.gameType)) {
+          const bounds = boundsForGame(session.gameType);
+          session.participants = session.participants.filter((p) => p.userId !== participant.userId);
+          await walletService.refundBet(participant.userId, session.stake, { roomId: session.roomId, reason: "disconnect" });
+          io.to(session.roomId).emit("lobby_update", { roomId: session.roomId, count: session.participants.length });
+          if (session.participants.length < bounds.min && session.startTimer) {
+            clearTimeout(session.startTimer);
+            session.startTimer = undefined;
+          }
+          if (session.status === "active") {
+            await endGame(session, [], "disconnect");
+          }
+          continue;
+        }
+
         const isPlayer1 = session.player1.socketId === socket.id;
         const isPlayer2 = session.player2?.socketId === socket.id;
         if (!isPlayer1 && !isPlayer2) continue;
         if (session.status === "waiting") {
-          await endGame(session, null, "disconnect");
+          await endGame(session, [], "disconnect");
         } else {
           const winner: PlayerId = isPlayer1 ? "p2" : "p1";
-          await endGame(session, winner, "disconnect");
+          const winnerId = winner === "p1" ? session.player1.userId : session.player2?.userId;
+          await endGame(session, winnerId ? [winnerId] : [], "disconnect");
         }
       }
     });
   });
+
+  // Heartbeat watchdog
+  setInterval(() => {
+    const now = Date.now();
+    for (const [sid, ts] of lastSeen.entries()) {
+      if (now - ts > HEARTBEAT_GRACE_MS) {
+        const sock = io.sockets.sockets.get(sid);
+        if (sock) sock.disconnect(true);
+      }
+    }
+  }, HEARTBEAT_GRACE_MS / 2);
 
   return io;
 }

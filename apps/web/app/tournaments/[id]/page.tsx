@@ -7,12 +7,46 @@ import Button from "../../../components/Button";
 import Tag from "../../../components/Tag";
 import { useAuth } from "../../../lib/auth";
 
+function Bracket({ matches }: { matches: any[] }) {
+  const byRound = (matches || []).reduce((acc: Record<number, any[]>, m: any) => {
+    acc[m.round] = acc[m.round] || [];
+    acc[m.round].push(m);
+    return acc;
+  }, {});
+  const rounds = Object.keys(byRound)
+    .map((r) => Number(r))
+    .sort((a, b) => a - b);
+  if (!rounds.length) return <p className="text-slate-400 text-sm">No bracket yet.</p>;
+
+  return (
+    <div className="flex gap-4 overflow-auto pb-2">
+      {rounds.map((round) => (
+        <div key={round} className="min-w-[180px] space-y-2">
+          <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Round {round}</p>
+          {byRound[round].map((m: any) => (
+            <div key={m.id} className="rounded-lg border border-white/10 bg-white/5 p-3 text-sm text-slate-200">
+              <div>{m.player1Id ?? "-"} vs {m.player2Id ?? "-"}</div>
+              <div className="text-xs text-slate-400">winner: {m.winnerId ?? "-"}</div>
+              <div className="text-[11px] text-slate-500">ext: {m.externalMatchId ?? "-"}</div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function TournamentDetail() {
   const { id } = useParams();
   const { authFetch } = useAuth();
   const [t, setT] = useState<any>(null);
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<string>("");
+  const matchesByRound = (t?.matches || []).reduce((acc: Record<number, any[]>, m: any) => {
+    acc[m.round] = acc[m.round] || [];
+    acc[m.round].push(m);
+    return acc;
+  }, {});
 
   useEffect(() => {
     if (!id) return;
@@ -64,15 +98,30 @@ export default function TournamentDetail() {
         </div>
       </Card>
       <Card title="Matches">
-        <div className="text-sm text-slate-200 space-y-1">
-          {t.matches?.length ? t.matches.map((m: any) => (
-            <div key={m.id} className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
-              <span>Round {m.round}</span>
-              <span>{m.player1Id ?? '-'} vs {m.player2Id ?? '-'}</span>
-              <span className="text-xs text-slate-400">winner: {m.winnerId ?? '-'}</span>
-            </div>
-          )) : <p className="text-slate-400 text-sm">No matches yet.</p>}
-        </div>
+        {t.matches?.length ? (
+          <div className="space-y-3 text-sm text-slate-200">
+            {Object.keys(matchesByRound)
+              .sort((a, b) => Number(a) - Number(b))
+              .map((round) => (
+                <div key={round}>
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Round {round}</p>
+                  <div className="mt-2 space-y-2">
+                    {matchesByRound[Number(round)].map((m: any) => (
+                      <div key={m.id} className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                        <span>{m.player1Id ?? '-'} vs {m.player2Id ?? '-'}</span>
+                        <span className="text-xs text-slate-400">winner: {m.winnerId ?? '-'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+          </div>
+        ) : (
+          <p className="text-slate-400 text-sm">No matches yet.</p>
+        )}
+      </Card>
+      <Card title="Bracket View">
+        <Bracket matches={t.matches || []} />
       </Card>
     </div>
   );

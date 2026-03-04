@@ -4,7 +4,7 @@ import { createServer } from "http";
 import { prisma } from "./prisma";
 import { config } from "./config";
 import { WalletService } from "@modules/wallet";
-import { MatchmakingService } from "@modules/matchmaking";
+import { MatchmakingService, RedisMatchmakingStore } from "@modules/matchmaking";
 import { CryptoRouter, MockAdapter, type Network } from "@modules/crypto";
 import { authMiddleware } from "./middlewares/auth";
 import { generateReferralCode } from "@modules/referral";
@@ -19,15 +19,60 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 const walletService = new WalletService(prisma);
-const matchmaking = new MatchmakingService();
+let matchmakingStore: any = undefined;
+if (config.redisUrl) {
+  try {
+    matchmakingStore = new RedisMatchmakingStore(config.redisUrl);
+    console.log("Matchmaking using Redis store");
+  } catch (e) {
+    console.warn("Redis matchmaking store unavailable, falling back to memory:", (e as Error).message);
+  }
+}
+const matchmaking = new MatchmakingService(45_000, 0.05, matchmakingStore as any);
 const tournamentService = new TournamentService(prisma, walletService);
 const crypto = new CryptoRouter();
 crypto.register(new MockAdapter("USDT"));
 crypto.register(new MockAdapter("ETH"));
 crypto.register(new MockAdapter("POLYGON"));
 
+// Flash Cup cron (simple interval)
+if (config.flashCupIntervalMinutes > 0) {
+  const intervalMs = config.flashCupIntervalMinutes * 60 * 1000;
+  const tick = () =>
+    tournamentService
+      .maybeCreateFlashCup({
+        intervalMinutes: config.flashCupIntervalMinutes,
+        entryFee: config.flashCupEntry,
+        prizePool: config.flashCupPrize
+      })
+      .catch((e) => console.warn("flash cup tick failed", e));
+  tick();
+  setInterval(tick, intervalMs);
+}
+
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.get("/metrics", async (_req, res) => {
+  const activeRooms = await prisma.gameRoom.count({ where: { status: { in: ["waiting", "active"] } } });
+  const finishedRooms = await prisma.gameRoom.count({ where: { status: "finished" } });
+  const { totalQueued, matchedCount } = matchmaking.stats();
+  const reviewDeposits = await prisma.transaction.count({ where: { type: "deposit", status: "review" } });
+  const pendingWithdrawals = await prisma.transaction.count({ where: { type: "withdraw", status: { in: ["pending", "review"] } } });
+   const flashCups = await prisma.tournament.count({ where: { title: "Flash Cup" } });
+  res.set("Content-Type", "text/plain");
+  res.send(
+    [
+      `gametg_active_rooms ${activeRooms}`,
+      `gametg_finished_rooms ${finishedRooms}`,
+      `gametg_matchmaking_queue ${totalQueued}`,
+      `gametg_matchmaking_matched_total ${matchedCount}`,
+      `gametg_deposits_review ${reviewDeposits}`,
+      `gametg_withdrawals_pending ${pendingWithdrawals}`,
+      `gametg_flash_cups ${flashCups}`
+    ].join("\n")
+  );
 });
 
 app.get("/games", (_req, res) => {
@@ -53,6 +98,15 @@ app.get("/tournaments", async (_req, res) => {
   res.json({ tournaments: list });
 });
 
+app.get("/flashcup", async (_req, res) => {
+  const t = await tournamentService.maybeCreateFlashCup({
+    intervalMinutes: config.flashCupIntervalMinutes,
+    entryFee: config.flashCupEntry,
+    prizePool: config.flashCupPrize
+  });
+  res.json({ tournament: t });
+});
+
 app.get("/tournaments/:id", async (req, res) => {
   const t = await tournamentService.get(req.params.id);
   if (!t) return res.status(404).json({ error: "Not found" });
@@ -68,6 +122,14 @@ app.post("/tournaments", authMiddleware(config.jwtSecret, prisma), async (req, r
   res.json({ tournament: t });
 });
 
+app.post("/tournaments/:id/start", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  if (req.user?.id !== config.adminApiKey && req.headers["x-admin-key"] !== config.adminApiKey) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  const bracket = await tournamentService.seedBracket(req.params.id);
+  res.json({ bracket });
+});
+
 app.post("/tournaments/:id/join", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
   const t = await tournamentService.join(req.params.id, req.user!.id);
   res.json({ participant: t });
@@ -80,6 +142,18 @@ app.post("/tournaments/:id/report", authMiddleware(config.jwtSecret, prisma), as
   const { matchId, winnerId, report } = req.body;
   const m = await tournamentService.reportMatch(req.params.id, matchId, winnerId, report);
   res.json({ match: m });
+});
+
+// External match report (for Dota/CS/WoT webhook)
+app.post("/tournaments/:id/report/external", async (req, res) => {
+  const { externalMatchId, winnerId, report } = req.body;
+  if (!externalMatchId || !winnerId) return res.status(400).json({ error: "Missing data" });
+  try {
+    const m = await tournamentService.reportExternal(req.params.id, externalMatchId, winnerId, report);
+    res.json({ match: m });
+  } catch (e: any) {
+    res.status(400).json({ error: e.message });
+  }
 });
 
 app.post("/auth/telegram", async (req, res) => {
@@ -167,14 +241,17 @@ app.post("/wallet/deposit-address", authMiddleware(config.jwtSecret, prisma), as
 });
 
 app.post("/wallet/deposit", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
-  const { amount, network, txHash } = req.body as { amount: number; network: Network; txHash?: string };
-  const { wallet } = await walletService.deposit(req.user!.id, amount, { network, txHash });
-  res.json({ balance: wallet.balance });
+  const { amount, network, txHash, device } = req.body as { amount: number; network: Network; txHash?: string; device?: string };
+  const ip = (req.headers["x-forwarded-for"] as string) ?? req.socket.remoteAddress;
+  const referenceId = txHash ? `dep:${network}:${txHash}` : undefined;
+  const { wallet, transaction } = await walletService.deposit(req.user!.id, amount, { network, txHash, ip, device }, referenceId);
+  res.json({ balance: wallet.balance, status: transaction.status, risk: (transaction.metadata as any)?.riskFlags ?? [] });
 });
 
 app.post("/wallet/withdraw", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
   const { amount, network, address } = req.body as { amount: number; network: Network; address: string };
-  const { transaction } = await walletService.requestWithdraw(req.user!.id, amount, { network, address });
+  const referenceId = `wd:${network}:${address}:${amount}`;
+  const { transaction } = await walletService.requestWithdraw(req.user!.id, amount, { network, address }, referenceId);
   res.json({ transaction });
 });
 
@@ -189,6 +266,91 @@ app.get("/rooms", authMiddleware(config.jwtSecret, prisma), async (_req, res) =>
 app.get("/leaderboard", authMiddleware(config.jwtSecret, prisma), async (_req, res) => {
   const leaderboard = await getLeaderboard(prisma);
   res.json({ leaderboard });
+});
+
+// Invite keys (viral loop)
+app.post("/invites/key", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  const { usesLeft = 3, rewardType = "nitro", days = 3 } = req.body as { usesLeft?: number; rewardType?: string; days?: number };
+  const key = await prisma.inviteKey.create({
+    data: {
+      ownerId: req.user!.id,
+      usesLeft,
+      rewardType,
+      expiresAt: new Date(Date.now() + days * 24 * 60 * 60 * 1000)
+    }
+  });
+  res.json({ key });
+});
+
+app.post("/invites/claim", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  const { keyId } = req.body as { keyId: string };
+  const key = await prisma.inviteKey.findUnique({ where: { id: keyId } });
+  if (!key) return res.status(404).json({ error: "Key not found" });
+  if (key.expiresAt < new Date()) return res.status(400).json({ error: "Expired" });
+  if (key.usesLeft <= 0) return res.status(400).json({ error: "No uses left" });
+
+  const already = await prisma.inviteClaim.findFirst({ where: { keyId, userId: req.user!.id } });
+  if (already) return res.status(400).json({ error: "Already claimed" });
+
+  await prisma.inviteKey.update({ where: { id: keyId }, data: { usesLeft: { decrement: 1 } } });
+  await prisma.inviteClaim.create({ data: { keyId, userId: req.user!.id } });
+  // progress team quest
+  await prisma.teamQuest.upsert({
+    where: { userId: req.user!.id },
+    update: { progress: { increment: 1 } },
+    create: {
+      userId: req.user!.id,
+      progress: 1,
+      target: 5,
+      expiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+    }
+  });
+
+  if (key.rewardType === "nitro") {
+    await walletService.deposit(req.user!.id, config.inviteKeyReward, { source: "invite_key", keyId });
+  }
+  res.json({ rewardType: key.rewardType });
+});
+
+// Team quest (invite/duo chest)
+app.get("/quests/team", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  const existing = await prisma.teamQuest.findUnique({ where: { userId: req.user!.id } });
+  if (existing) return res.json({ quest: existing });
+  const quest = await prisma.teamQuest.create({
+    data: {
+      userId: req.user!.id,
+      target: 5,
+      progress: 0,
+      expiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+    }
+  });
+  res.json({ quest });
+});
+
+app.post("/quests/team/progress", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  const { inc = 1 } = req.body as { inc?: number };
+  const quest = await prisma.teamQuest.upsert({
+    where: { userId: req.user!.id },
+    update: { progress: { increment: inc } },
+    create: {
+      userId: req.user!.id,
+      target: 5,
+      progress: inc,
+      expiresAt: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000)
+    }
+  });
+  res.json({ quest });
+});
+
+app.post("/quests/team/claim", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
+  const quest = await prisma.teamQuest.findUnique({ where: { userId: req.user!.id } });
+  if (!quest) return res.status(404).json({ error: "Quest missing" });
+  if (quest.rewardClaimed) return res.status(400).json({ error: "Already claimed" });
+  if (quest.progress < quest.target) return res.status(400).json({ error: "Not complete" });
+  await prisma.teamQuest.update({ where: { id: quest.id }, data: { rewardClaimed: true } });
+  // reward: small bonus deposited
+  await walletService.deposit(req.user!.id, config.teamQuestReward, { source: "team_chest" });
+  res.json({ ok: true, reward: config.teamQuestReward });
 });
 
 app.get("/referrals", authMiddleware(config.jwtSecret, prisma), async (req, res) => {
@@ -237,6 +399,140 @@ app.get("/admin/users", adminGuard, async (_req, res) => {
     take: 100
   });
   res.json({ users });
+});
+
+app.get("/admin/games/:id/moves", adminGuard, async (req, res) => {
+  const { id } = req.params;
+  const moves = await prisma.gameMove.findMany({
+    where: { gameId: id },
+    orderBy: { createdAt: "asc" }
+  });
+  res.json({ moves });
+});
+
+app.get("/admin/games/:id/replay.json", adminGuard, async (req, res) => {
+  const { id } = req.params;
+  const room = await prisma.gameRoom.findUnique({ where: { id } });
+  if (!room) return res.status(404).json({ error: "Not found" });
+  const moves = await prisma.gameMove.findMany({ where: { gameId: id }, orderBy: { createdAt: "asc" } });
+  res.json({ room, moves });
+});
+
+app.get("/admin/anomaly/scan", adminGuard, async (_req, res) => {
+  const since = new Date(Date.now() - 60 * 60 * 1000);
+  const fastGames = await prisma.gameRoom.count({
+    where: { createdAt: { gte: since }, status: "finished" },
+    // approximate: use moves count < 2 as proxy for very short
+    include: { moves: true }
+  });
+  const repeatPairs = await prisma.gameRoom.groupBy({
+    by: ["player1Id", "player2Id"],
+    where: { createdAt: { gte: since }, player2Id: { not: null } },
+    _count: { _all: true },
+    having: { _count: { _all: { gt: 3 } } }
+  });
+  res.json({ fastGames, repeatPairs });
+});
+
+app.get("/admin/risk/report", adminGuard, async (_req, res) => {
+  const reviewDeposits = await prisma.transaction.count({ where: { type: "deposit", status: "review" } });
+  const reviewWins = await prisma.transaction.count({ where: { type: "win", status: "review" } });
+  const reviewWithdraws = await prisma.transaction.count({ where: { type: "withdraw", status: { in: ["review", "pending"] } } });
+  const since = new Date(Date.now() - 60 * 60 * 1000);
+  const fastList = await prisma.gameRoom.findMany({
+    where: { createdAt: { gte: since }, status: "finished" },
+    take: 50,
+    orderBy: { createdAt: "desc" },
+    include: { moves: true }
+  });
+  const shortGames = fastList.filter((g) => g.moves.length < 2).length;
+  const repeatPairs = await prisma.gameRoom.groupBy({
+    by: ["player1Id", "player2Id"],
+    where: { createdAt: { gte: since }, player2Id: { not: null } },
+    _count: { _all: true },
+    having: { _count: { _all: { gt: 3 } } }
+  });
+  res.json({ reviewDeposits, reviewWins, reviewWithdraws, shortGames, repeatPairs });
+});
+
+app.get("/admin/transactions", adminGuard, async (_req, res) => {
+  const transactions = await prisma.transaction.findMany({
+    orderBy: { createdAt: "desc" },
+    take: 100
+  });
+  res.json({ transactions });
+});
+
+app.get("/admin/deposits/review", adminGuard, async (_req, res) => {
+  const review = await prisma.transaction.findMany({
+    where: { type: "deposit", status: "review" },
+    orderBy: { createdAt: "desc" },
+    take: 100
+  });
+  res.json({ review });
+});
+
+app.post("/admin/deposits/:id/approve", adminGuard, async (req, res) => {
+  const { id } = req.params;
+  const tx = await walletService.approveDeposit(id);
+  res.json({ transaction: tx });
+});
+
+app.post("/admin/deposits/:id/reject", adminGuard, async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body as { reason?: string };
+  const tx = await walletService.rejectDeposit(id, reason);
+  res.json({ transaction: tx });
+});
+
+app.get("/admin/wins/review", adminGuard, async (_req, res) => {
+  const review = await prisma.transaction.findMany({
+    where: { type: "win", status: "review" },
+    orderBy: { createdAt: "desc" },
+    take: 100
+  });
+  res.json({ review });
+});
+
+app.post("/admin/wins/:id/approve", adminGuard, async (req, res) => {
+  const { id } = req.params;
+  const tx = await walletService.approveWin(id);
+  res.json({ transaction: tx });
+});
+
+app.post("/admin/wins/:id/reject", adminGuard, async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body as { reason?: string };
+  const tx = await walletService.rejectWin(id, reason);
+  res.json({ transaction: tx });
+});
+
+app.get("/admin/withdrawals", adminGuard, async (_req, res) => {
+  const pending = await prisma.transaction.findMany({
+    where: { type: "withdraw", status: { in: ["pending", "failed"] } },
+    orderBy: { createdAt: "desc" },
+    take: 100
+  });
+  res.json({ withdrawals: pending });
+});
+
+app.get("/admin/metrics", adminGuard, async (_req, res) => {
+  res.json({
+    matchmaking: matchmaking.stats()
+  });
+});
+
+app.post("/admin/withdrawals/:id/approve", adminGuard, async (req, res) => {
+  const { id } = req.params;
+  const tx = await walletService.approveWithdraw(id);
+  res.json({ transaction: tx });
+});
+
+app.post("/admin/withdrawals/:id/reject", adminGuard, async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body as { reason?: string };
+  const tx = await walletService.rejectWithdraw(id, reason);
+  res.json({ transaction: tx });
 });
 
 app.patch("/admin/ban/:id", adminGuard, async (req, res) => {

@@ -1,0 +1,11 @@
+# Grafana Notes
+- Add Prometheus data source pointing to your Prometheus.
+- Import metrics:
+  - `gametg_active_rooms`, `gametg_finished_rooms`
+  - `gametg_matchmaking_queue`, `gametg_matchmaking_matched_total`
+  - `gametg_deposits_review`, `gametg_withdrawals_pending`
+- Useful panels:
+  - Singlestats for queue size, deposits_review, withdrawals_pending
+  - Time-series of queue and matched_total (rate)
+  - Table of recent alerts (from Alertmanager)
+- Suggested alert rules: see `docs/alerts/alertmanager.yaml`.

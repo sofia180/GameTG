@@ -20,6 +20,7 @@ enum TransactionStatus {
   failed
   locked
   refunded
+  review
 }
 
 enum GameStatus {
@@ -36,6 +37,7 @@ enum GameType {
   battleship
   durak
   mafia
+  amongus
 }
 
 enum TournamentStatus {
@@ -168,6 +170,64 @@ model GameMove {
 
   game   GameRoom @relation(fields: [gameId], references: [id])
   player User     @relation(fields: [playerId], references: [id])
+}
+
+model InviteKey {
+  id         String   @id @default(uuid())
+  ownerId    String
+  usesLeft   Int
+  rewardType String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  claims     InviteClaim[]
+
+  owner User @relation(fields: [ownerId], references: [id])
+}
+
+model InviteClaim {
+  id        String   @id @default(uuid())
+  keyId     String
+  userId    String
+  createdAt DateTime @default(now())
+
+  key  InviteKey @relation(fields: [keyId], references: [id])
+  user User      @relation(fields: [userId], references: [id])
+}
+
+model TeamQuest {
+  id            String   @id @default(uuid())
+  userId        String   @unique
+  progress      Int      @default(0)
+  target        Int      @default(5)
+  expiresAt     DateTime
+  rewardClaimed Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model DuoBoost {
+  id        String   @id @default(uuid())
+  userId    String
+  partnerId String
+  count     Int      @default(0)
+  activated Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user    User @relation("DuoUser", fields: [userId], references: [id])
+  partner User @relation("DuoPartner", fields: [partnerId], references: [id])
+
+  @@unique([userId, partnerId])
+}
+
+model UserBoost {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id])
 }
 
 model ReferralReward {

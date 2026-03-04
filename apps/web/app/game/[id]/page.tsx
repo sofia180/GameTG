@@ -6,8 +6,14 @@ import Card from "../../../components/Card";
 import Button from "../../../components/Button";
 import Tag from "../../../components/Tag";
 import { useSocket } from "../../../lib/socket";
+import { track } from "../../../lib/analytics";
+import dynamic from "next/dynamic";
 
-type Player = "p1" | "p2";
+type Player = "p1" | "p2" | string;
+const DurakView = dynamic(() => import("../renderers").then((m) => m.DurakView), { ssr: false, loading: () => <p className="text-slate-400">Loading Durak…</p> });
+const MafiaView = dynamic(() => import("../renderers").then((m) => m.MafiaView), { ssr: false, loading: () => <p className="text-slate-400">Loading Mafia…</p> });
+const AmongUsView = dynamic(() => import("../renderers").then((m) => m.AmongUsView), { ssr: false, loading: () => <p className="text-slate-400">Loading game…</p> });
+const BattleshipView = dynamic(() => import("../renderers").then((m) => m.BattleshipView), { ssr: false, loading: () => <p className="text-slate-400">Loading battleship…</p> });
 
 function fenToBoard(fen: string) {
   const [board] = fen.split(" ");
@@ -73,6 +79,8 @@ export default function GameRoomPage() {
   const [message, setMessage] = useState<string>("");
   const [selection, setSelection] = useState<{ x: number; y: number } | null>(null);
   const [chessFrom, setChessFrom] = useState<string | null>(null);
+  const [connected, setConnected] = useState<boolean>(true);
+  const [ended, setEnded] = useState<{ reason?: string; winners?: string[] } | null>(null);
 
   useEffect(() => {
     const fromQuery = search.get("code");
@@ -87,7 +95,15 @@ export default function GameRoomPage() {
 
   useEffect(() => {
     if (!socket) return;
-    socket.emit("join_room", { roomId, roomCode });
+    const join = () => socket.emit("join_room", { roomId, roomCode });
+    const onConnect = () => {
+      setConnected(true);
+      join();
+    };
+    const onDisconnect = () => setConnected(false);
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    join();
     const onStart = (payload: any) => {
       if (payload.roomId !== roomId) return;
       setGameType(payload.gameType);
@@ -100,6 +116,8 @@ export default function GameRoomPage() {
     };
     const onEnd = (payload: any) => {
       setMessage(`Game ended: ${payload.reason}`);
+      setEnded({ reason: payload.reason, winners: payload.winners });
+      track("game_end", { roomId, reason: payload.reason, winners: payload.winners, gameType });
     };
     const onError = (payload: any) => {
       setMessage(payload.message ?? "Error");
@@ -113,8 +131,29 @@ export default function GameRoomPage() {
       socket.off("move", onMove);
       socket.off("game_end", onEnd);
       socket.off("error", onError);
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
     };
   }, [socket, roomId, roomCode]);
+
+  const shareLink = () => {
+    const bot = process.env.NEXT_PUBLIC_TELEGRAM_BOT || "";
+    const code = roomCode || roomId;
+    const deeplink = bot ? `https://t.me/${bot}?start=room_${code}` : `${window.location.origin}/game/${roomId}?code=${code}`;
+    const text = `Сыграем реванш в ${gameType || "game"}? ${deeplink}`;
+    if (navigator.share) {
+      navigator.share({ title: "Реванш", text, url: deeplink }).catch(() => undefined);
+    } else {
+      navigator.clipboard?.writeText(text);
+      alert("Ссылка скопирована");
+    }
+    track("share_replay", { roomId, gameType, deeplink });
+  };
+
+  const rematch = () => {
+    track("rematch_clicked", { roomId, gameType });
+    router.push("/lobby");
+  };
 
   const sendMove = (move: unknown) => {
     socket?.emit("move", { roomId, move });
@@ -142,56 +181,6 @@ export default function GameRoomPage() {
               </button>
             ))
           )}
-        </div>
-      );
-    }
-
-    if (gameType === "durak") {
-      const isAttacker = state?.attacker === player;
-      const myHand = state?.hands?.[player === "p1" ? "p1" : "p2"] ?? [];
-      const table = state?.table ?? [];
-      const trump = state?.trump;
-      const playCard = (card: string) => sendMove({ type: "attack", card });
-      const defend = (attackCard: string, defenseCard: string) => sendMove({ type: "defend", attackCard, defenseCard });
-      return (
-        <div className="space-y-3">
-          <p className="text-sm text-slate-300">Durak · Trump: {trump} · You are {player}</p>
-          <div className="flex flex-wrap gap-2">
-            {table.map((p: any, idx: number) => (
-              <div key={idx} className="rounded-lg bg-white/5 px-3 py-2">
-                <div>Attack: {p.attack}</div>
-                <div>Defense: {p.defense ?? "-"}</div>
-                {isAttacker && !p.defense && (
-                  <div className="flex gap-1 mt-1">
-                    {myHand.map((c: string) => (
-                      <button key={c} className="rounded border border-white/20 px-2 text-xs" onClick={() => defend(p.attack, c)}>
-                        {c}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {myHand.map((c: string) => (
-              <button
-                key={c}
-                className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-sm hover:border-neon"
-                onClick={() => (isAttacker ? playCard(c) : undefined)}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <Button variant="ghost" onClick={() => sendMove({ type: "take" })}>
-              Take
-            </Button>
-            <Button variant="ghost" onClick={() => sendMove({ type: "end_turn" })}>
-              End Turn
-            </Button>
-          </div>
         </div>
       );
     }
@@ -259,189 +248,51 @@ export default function GameRoomPage() {
     }
 
     if (gameType === "battleship") {
-      const opponent = player === "p1" ? "p2" : "p1";
-      return (
-        <div className="space-y-4">
-          {state.phase === "placement" && !state.placed?.[player ?? "p1"] && (
-            <Button onClick={() => sendMove({ type: "place", ships: randomBattleshipShips() })}>Auto Place Ships</Button>
-          )}
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <p className="text-xs text-slate-400">Your Board</p>
-              <div className="grid grid-cols-8 gap-1">
-                {state.boards?.[player ?? "p1"]?.map((row: any[], x: number) =>
-                  row.map((cell: any, y: number) => (
-                    <div
-                      key={`self-${x}-${y}`}
-                      className={`h-8 w-8 rounded ${cell.ship ? "bg-neon/40" : "bg-white/10"} ${
-                        cell.hit ? "ring-2 ring-ember" : ""
-                      }`}
-                    />
-                  ))
-                )}
-              </div>
-            </div>
-            <div>
-              <p className="text-xs text-slate-400">Enemy Board</p>
-              <div className="grid grid-cols-8 gap-1">
-                {state.boards?.[opponent]?.map((row: any[], x: number) =>
-                  row.map((cell: any, y: number) => (
-                    <button
-                      key={`enemy-${x}-${y}`}
-                      onClick={() => sendMove({ type: "fire", x, y })}
-                      className={`h-8 w-8 rounded ${cell.hit ? "bg-ember/40" : "bg-white/10"}`}
-                    />
-                  ))
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      );
+      return <BattleshipView state={state} player={player ?? "p1"} sendMove={sendMove} randomShips={randomBattleshipShips} />;
     }
 
     if (gameType === "durak") {
-      const isAttacker = state?.attacker === player;
-      const myHand = state?.hands?.[player ?? "p1"] ?? [];
-      const table = state?.table ?? [];
-      const trump = state?.trump;
-      const playCard = (card: string) => sendMove({ type: "attack", card });
-      const defend = (attackCard: string, defenseCard: string) => sendMove({ type: "defend", attackCard, defenseCard });
-      return (
-        <div className="space-y-3">
-          <p className="text-sm text-slate-300">Durak · Trump: {trump} · You are {player}</p>
-          <div className="flex flex-wrap gap-2">
-            {table.map((p: any, idx: number) => (
-              <div key={idx} className="rounded-lg bg-white/5 px-3 py-2">
-                <div>Attack: {p.attack}</div>
-                <div>Defense: {p.defense ?? "-"}</div>
-                {!p.defense && !isAttacker && (
-                  <div className="flex gap-1 mt-1">
-                    {myHand.map((c: string) => (
-                      <button key={c} className="rounded border border-white/20 px-2 text-xs" onClick={() => defend(p.attack, c)}>
-                        {c}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {myHand.map((c: string) => (
-              <button
-                key={c}
-                className="rounded-lg border border-white/20 bg-white/5 px-3 py-2 text-sm hover:border-neon"
-                onClick={() => (isAttacker ? playCard(c) : undefined)}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <Button variant="ghost" onClick={() => sendMove({ type: "take" })}>
-              Take
-            </Button>
-            <Button variant="ghost" onClick={() => sendMove({ type: "end_turn" })}>
-              End Turn
-            </Button>
-          </div>
-        </div>
-      );
+      return <DurakView state={state} player={player ?? "p1"} sendMove={sendMove} />;
     }
 
     if (gameType === "mafia") {
-      const me = state.players?.find((p: any) => p.id === player);
-      return (
-        <div className="space-y-3">
-          <p className="text-sm text-slate-300">Mafia · You: {player}</p>
-          <p className="text-sm text-white">Role: {me?.role || "hidden"}</p>
-          <div className="text-xs text-slate-400">Phase: {state.phase}</div>
-          <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-sm text-slate-200">
-            Alive: {(state.players || []).filter((p: any) => p.alive).map((p: any) => p.id).join(", ")}
-          </div>
-          {state.phase === "night" && me?.role === "mafia" && (
-            <div className="space-y-2">
-              <p className="text-sm text-white">Choose target</p>
-              <div className="flex flex-wrap gap-2">
-                {(state.players || [])
-                  .filter((p: any) => p.alive && p.id !== me.id)
-                  .map((p: any) => (
-                    <button key={p.id} className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "mafia_target", target: p.id })}>
-                      {p.id}
-                    </button>
-                  ))}
-              </div>
-            </div>
-          )}
-          {state.phase === "night" && me?.role === "doctor" && (
-            <div className="space-y-2">
-              <p className="text-sm text-white">Save player</p>
-              <div className="flex flex-wrap gap-2">
-                {(state.players || []).filter((p: any) => p.alive).map((p: any) => (
-                  <button key={p.id} className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "doctor_save", target: p.id })}>
-                    {p.id}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-          {state.phase === "night" && me?.role === "detective" && (
-            <div className="space-y-2">
-              <p className="text-sm text-white">Check player</p>
-              <div className="flex flex-wrap gap-2">
-                {(state.players || [])
-                  .filter((p: any) => p.alive && p.id !== me.id)
-                  .map((p: any) => (
-                    <button key={p.id} className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "detective_check", target: p.id })}>
-                      {p.id}
-                    </button>
-                  ))}
-              </div>
-            </div>
-          )}
-          {state.phase === "day" && (
-            <div className="space-y-2">
-              <p className="text-sm text-white">Vote to kick</p>
-              <div className="flex flex-wrap gap-2">
-                {(state.players || [])
-                  .filter((p: any) => p.alive && p.id !== me?.id)
-                  .map((p: any) => (
-                    <button key={p.id} className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "vote", target: p.id })}>
-                      {p.id}
-                    </button>
-                  ))}
-                <button className="rounded border border-white/20 px-3 py-1 text-xs" onClick={() => sendMove({ type: "vote", target: null })}>Skip</button>
-              </div>
-              <Button variant="ghost" onClick={() => sendMove({ type: "advance_day" })}>Advance day</Button>
-            </div>
-          )}
-          {state.phase === "night" && (
-            <Button variant="ghost" onClick={() => sendMove({ type: "advance_night" })}>Advance night</Button>
-          )}
-        </div>
-      );
+      return <MafiaView state={state} player={player ?? ""} sendMove={sendMove} />;
+    }
+
+    if (gameType === "amongus") {
+      return <AmongUsView state={state} player={player ?? ""} sendMove={sendMove} />;
     }
 
     return <p className="text-slate-400">Unsupported game type.</p>;
   };
 
-  return (
-    <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-      <Card title="Game Room">
-        <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
-          <Tag>Room {roomId.slice(0, 6)}</Tag>
-          {gameType && <Tag>{gameType}</Tag>}
-          {player && <Tag>You: {player}</Tag>}
-        </div>
-        <div className="mt-4">{renderBoard()}</div>
-      </Card>
-      <Card title="Match Info">
-        <div className="space-y-3 text-sm text-slate-300">
-          <p>Invite code: {code ?? "--"}</p>
-          <p>{message || "Waiting for opponent or next move."}</p>
-        </div>
-      </Card>
-    </div>
-  );
-}
+    return (
+      <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+        <Card title="Game Room">
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-400">
+            <Tag>Room {roomId.slice(0, 6)}</Tag>
+            {gameType && <Tag>{gameType}</Tag>}
+            {player && <Tag>You: {player}</Tag>}
+          </div>
+          <div className="mt-4">{renderBoard()}</div>
+        </Card>
+        <Card title="Match Info">
+          <div className="space-y-3 text-sm text-slate-300">
+            {!connected && <p className="rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-amber-100">Reconnecting…</p>}
+            <p>Invite code: {roomCode ?? "--"}</p>
+            <p>{message || "Waiting for opponent or next move."}</p>
+            {ended && (
+              <div className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-3">
+                <p className="text-sm text-white">Реванш или поделиться результатом</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="primary" onClick={rematch}>Реванш</Button>
+                  <Button variant="ghost" onClick={shareLink}>Поделиться</Button>
+                </div>
+                {ended?.reason && <p className="text-xs text-slate-400">Причина: {ended.reason}</p>}
+              </div>
+            )}
+          </div>
+        </Card>
+      </div>
+    );
+  }

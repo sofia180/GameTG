@@ -4,8 +4,9 @@ import { createTicTacToe } from "@games/tictactoe";
 import { createBattleship } from "@games/battleship";
 import { createDurakEngine } from "./durak/engine";
 import { createMafiaEngine } from "./mafia/engine";
+import { createAmongUsEngine } from "./amongus/engine";
 
-export type GameType = "chess" | "checkers" | "tictactoe" | "battleship" | "durak" | "mafia";
+export type GameType = "chess" | "checkers" | "tictactoe" | "battleship" | "durak" | "mafia" | "amongus";
 export type PlayerId = "p1" | "p2";
 
 export type GameInstance = {
@@ -28,14 +29,20 @@ export function createGameEngine(gameType: GameType): GameInstance {
     case "mafia":
       // mafia engine needs player IDs; here we return a lazy instance, the caller should replace state later
       throw new Error("Mafia engine requires player IDs; instantiate via createMafiaEngine(ids)");
+    case "amongus":
+      throw new Error("AmongUs engine requires player IDs; instantiate via createAmongUsEngine(ids)");
     default:
       throw new Error(`Unsupported game type: ${gameType}`);
   }
 }
 
 export function createGameEngineWithPlayers(gameType: GameType, playerIds: string[]): GameInstance {
-  if (gameType === "mafia") {
-    return createMafiaEngine(playerIds);
+  switch (gameType) {
+    case "mafia":
+      return createMafiaEngine(playerIds);
+    case "amongus":
+      return createAmongUsEngine(playerIds);
+    default:
+      return createGameEngine(gameType);
   }
-  return createGameEngine(gameType);
 }

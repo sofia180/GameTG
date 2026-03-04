@@ -26,6 +26,10 @@ export interface MafiaState {
   round: number;
 }
 
+export type MafiaOutcome =
+  | { status: 'win'; side: 'mafia' | 'town'; winners: MafiaPlayerId[] }
+  | { status: 'draw' };
+
 export type MafiaMove =
   | { type: 'mafia_target'; target: MafiaPlayerId }
   | { type: 'doctor_save'; target: MafiaPlayerId }
@@ -64,11 +68,11 @@ export function createMafiaEngine(playerIds: MafiaPlayerId[]) {
   const alive = () => state.players.filter((p) => p.alive);
   const aliveOfRole = (role: Role) => alive().filter((p) => p.role === role);
 
-  const winCheck = (): MafiaState['winner'] => {
+  const winCheck = (): MafiaOutcome | undefined => {
     const mafiaAlive = aliveOfRole('mafia').length;
     const townAlive = alive().length - mafiaAlive;
-    if (mafiaAlive === 0) return 'town';
-    if (mafiaAlive >= townAlive) return 'mafia';
+    if (mafiaAlive === 0) return { status: 'win', side: 'town', winners: alive().map((p) => p.id) };
+    if (mafiaAlive >= townAlive) return { status: 'win', side: 'mafia', winners: aliveOfRole('mafia').map((p) => p.id) };
     return undefined;
   };
 
@@ -113,8 +117,8 @@ export function createMafiaEngine(playerIds: MafiaPlayerId[]) {
       const win = winCheck();
       if (win) {
         state.phase = 'finished';
-        state.winner = win;
-        return { valid: true, state, outcome: { status: 'win', winner: win === 'mafia' ? 'p1' : 'p2' } }; // winner mapping handled upstream
+        state.winner = win.side;
+        return { valid: true, state, outcome: win };
       }
       return { valid: true, state };
     }
@@ -151,8 +155,8 @@ export function createMafiaEngine(playerIds: MafiaPlayerId[]) {
       const win = winCheck();
       if (win) {
         state.phase = 'finished';
-        state.winner = win;
-        return { valid: true, state, outcome: { status: 'win', winner: win === 'mafia' ? 'p1' : 'p2' } };
+        state.winner = win.side;
+        return { valid: true, state, outcome: win };
       }
       return { valid: true, state };
     }

@@ -1,0 +1,29 @@
+groups:
+  - name: gametg-alerts
+    rules:
+      - alert: MatchmakingQueueHigh
+        expr: gametg_matchmaking_queue > 50
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Matchmaking queue backlog high"
+          description: "Queued players: {{ $value }}"
+
+      - alert: DepositsInReview
+        expr: gametg_deposits_review > 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Deposits awaiting review"
+          description: "Review queue size {{ $value }}"
+
+      - alert: WithdrawalsPending
+        expr: gametg_withdrawals_pending > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Withdrawals pending/review elevated"
+          description: "Pending/review withdrawals {{ $value }}"
