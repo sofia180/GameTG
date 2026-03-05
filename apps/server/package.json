@@ -10,6 +10,15 @@
     "prisma": "prisma"
   },
   "dependencies": {
+    "@games/battleship": "workspace:*",
+    "@games/checkers": "workspace:*",
+    "@games/chess": "workspace:*",
+    "@games/tictactoe": "workspace:*",
+    "@modules/crypto": "workspace:*",
+    "@modules/leaderboard": "workspace:*",
+    "@modules/matchmaking": "workspace:*",
+    "@modules/referral": "workspace:*",
+    "@modules/wallet": "workspace:*",
     "@prisma/client": "^5.22.0",
     "chess.js": "^1.0.0",
     "cors": "^2.8.5",

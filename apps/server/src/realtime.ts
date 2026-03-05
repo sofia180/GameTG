@@ -6,6 +6,7 @@ import { WalletService } from "@modules/wallet";
 import { computePlatformFee, computeReferralRewardFromFee } from "@modules/referral";
 import { createGameEngine, createGameEngineWithPlayers, type GameType, type PlayerId } from "./games/registry";
 import { verifyJwt } from "./auth/jwt";
+import { config } from "./config";
 
 interface RoomSession {
   roomId: string;

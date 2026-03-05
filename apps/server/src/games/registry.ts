@@ -9,9 +9,14 @@ import { createAmongUsEngine } from "./amongus/engine";
 export type GameType = "chess" | "checkers" | "tictactoe" | "battleship" | "durak" | "mafia" | "amongus";
 export type PlayerId = "p1" | "p2";
 
+type GameOutcome =
+  | { status: "win"; winner?: PlayerId | string | null; winners?: (PlayerId | string)[]; side?: string }
+  | { status: "draw" }
+  | { status: string; [key: string]: unknown };
+
 export type GameInstance = {
   state: Record<string, unknown>;
-  applyMove: (player: PlayerId, move: unknown) => { valid: boolean; state?: unknown; error?: string; outcome?: { status: string; winner?: PlayerId | null } };
+  applyMove: (player: PlayerId | string, move: unknown) => { valid: boolean; state?: unknown; error?: string; outcome?: GameOutcome };
 };
 
 export function createGameEngine(gameType: GameType): GameInstance {

@@ -1,6 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
-import { TournamentStatus } from "@prisma/client";
 import { WalletService } from "@modules/wallet";
+
+const TournamentStatus = {
+  draft: "draft",
+  active: "active",
+  completed: "completed",
+  cancelled: "cancelled"
+} as const;
 
 type Participant = { userId: string };
 
