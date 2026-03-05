@@ -3,12 +3,14 @@ export default function Button({
   onClick,
   variant = "primary",
   type = "button",
+  disabled = false,
   className
 }: {
   children: React.ReactNode;
   onClick?: () => void;
   variant?: "primary" | "ghost" | "danger";
   type?: "button" | "submit";
+  disabled?: boolean;
   className?: string;
 }) {
   const base =
@@ -21,7 +23,12 @@ export default function Button({
     danger: "bg-ember text-ink hover:opacity-90"
   };
   return (
-    <button type={type} onClick={onClick} className={`${base} ${styles[variant]} ${className ?? ""}`}>
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled}
+      className={`${base} ${styles[variant]} ${className ?? ""} ${disabled ? "opacity-60 cursor-not-allowed" : ""}`}
+    >
       <span className="absolute inset-0 -z-10 bg-gradient-to-r from-neonPurple/30 via-neon/30 to-neonCyan/30 blur-xl" />
       <span className={variant === "primary" ? "pulse-soft" : ""}>{children}</span>
     </button>
