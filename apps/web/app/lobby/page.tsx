@@ -278,7 +278,7 @@ export default function LobbyPage() {
                     <div className="h-full rounded-full bg-emerald-400" style={{ width: `${Math.min(100, (teamQuest.progress / teamQuest.target) * 100)}%` }} />
                   </div>
                   {!teamQuest.rewardClaimed && teamQuest.progress >= teamQuest.target && (
-                    <Button size="sm" variant="primary" onClick={claimTeamReward} disabled={claimLoading}>Claim</Button>
+                    <Button variant="primary" onClick={claimTeamReward} disabled={claimLoading}>Claim</Button>
                   )}
                   {teamQuest.rewardClaimed && <Tag>Claimed</Tag>}
                 </div>
