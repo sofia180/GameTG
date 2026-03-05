@@ -1,0 +1,11 @@
+[phases.setup]
+cmds = ["corepack enable"]
+
+[phases.install]
+cmds = ["pnpm install --recursive --frozen-lockfile=false"]
+
+[phases.build]
+cmds = ["pnpm --filter server build"]
+
+[start]
+cmd = "pnpm --filter server start"
