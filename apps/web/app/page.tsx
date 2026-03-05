@@ -70,7 +70,7 @@ export default function LandingPage() {
   const [metrics, setMetrics] = useState({ players: 12420, winnings: 42180, tournaments: 12, biggest: 680 });
 
   useEffect(() => {
-    const ref = params.get("ref") ?? undefined;
+    const ref = params?.get?.("ref") ?? undefined;
     // @ts-ignore
     const tg = typeof window !== "undefined" ? window.Telegram?.WebApp : undefined;
     tg?.ready?.();
