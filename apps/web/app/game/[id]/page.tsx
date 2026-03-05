@@ -68,6 +68,9 @@ function randomBattleshipShips() {
 
 export default function GameRoomPage() {
   const params = useParams();
+  if (!params?.id) {
+    return <p className="text-slate-400">Invalid room</p>;
+  }
   const search = useSearchParams();
   const router = useRouter();
   const socket = useSocket();
