@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Card from "../../../components/Card";
 import Button from "../../../components/Button";
 import Tag from "../../../components/Tag";
@@ -69,6 +69,7 @@ function randomBattleshipShips() {
 export default function GameRoomPage() {
   const params = useParams();
   const search = useSearchParams();
+  const router = useRouter();
   const socket = useSocket();
   const roomId = params.id as string;
   const [roomCode, setRoomCode] = useState<string | undefined>(undefined);

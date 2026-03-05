@@ -420,11 +420,12 @@ app.get("/admin/games/:id/replay.json", adminGuard, async (req, res) => {
 
 app.get("/admin/anomaly/scan", adminGuard, async (_req, res) => {
   const since = new Date(Date.now() - 60 * 60 * 1000);
-  const fastGames = await prisma.gameRoom.count({
+  const finished = await prisma.gameRoom.findMany({
     where: { createdAt: { gte: since }, status: "finished" },
-    // approximate: use moves count < 2 as proxy for very short
-    include: { moves: true }
+    include: { moves: true },
+    take: 200
   });
+  const fastGames = finished.filter((g) => g.moves.length < 2).length;
   const repeatPairs = await prisma.gameRoom.groupBy({
     by: ["player1Id", "player2Id"],
     where: { createdAt: { gte: since }, player2Id: { not: null } },
