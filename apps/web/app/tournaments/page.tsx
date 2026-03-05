@@ -113,7 +113,7 @@ export default function TournamentsPage() {
                 {duplicated.map((t, idx) => (
                   <span key={`${t.id}-${idx}`} className="flex items-center gap-2 text-slate-100">
                     <span className="h-1.5 w-1.5 rounded-full bg-neon" />
-                    {t.name} +{Math.floor(Math.random() * 3) + 1} joins
+                    {t.title} +{Math.floor(Math.random() * 3) + 1} joins
                   </span>
                 ))}
               </div>
