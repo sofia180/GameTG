@@ -87,7 +87,7 @@ export default function GameRoomPage() {
   const [ended, setEnded] = useState<{ reason?: string; winners?: string[] } | null>(null);
 
   useEffect(() => {
-    const fromQuery = search.get("code");
+    const fromQuery = search?.get?.("code");
     if (fromQuery) {
       setRoomCode(fromQuery);
       window.localStorage.setItem(`room:${roomId}`, fromQuery);
