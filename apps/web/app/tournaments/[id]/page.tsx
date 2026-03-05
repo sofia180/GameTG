@@ -37,7 +37,9 @@ function Bracket({ matches }: { matches: any[] }) {
 }
 
 export default function TournamentDetail() {
-  const { id } = useParams<{ id: string }>();
+  const params = useParams();
+  const idParam = params?.id;
+  const id = Array.isArray(idParam) ? idParam[0] : idParam;
   const { authFetch } = useAuth();
   const [t, setT] = useState<any>(null);
   const [loading, setLoading] = useState(false);
